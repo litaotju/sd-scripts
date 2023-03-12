@@ -7,3 +7,5 @@ build
 .vscode
 data
 *.log
+output
+gen/
