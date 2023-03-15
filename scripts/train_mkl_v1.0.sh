@@ -2,8 +2,8 @@ set -x
 
 ## Change this for your model's data and model name, and number of steps
 input="./data/mkl.v1.0"
-model_name="mkl.v1.0.1"
-resume_model="mkl.v1.0.1"
+model_name="mkl.v1.0.2"
+resume_model="mkl.v1.0.2"
 resume_from="output/${resume_model}/${resume_model}-state"
 
 steps=2000
@@ -28,7 +28,7 @@ accelerate launch --num_cpu_threads_per_process 1 \
     train_network.py  \
     --pretrained_model_name_or_path=${base_model} \
     --mixed_precision=fp16 \
-    --train_batch_size=1 \
+    --train_batch_size=4 \
     --unet_lr=2e-4 \
     --text_encoder_lr=5e-5 \
     --optimizer_type=AdamW8bit \
