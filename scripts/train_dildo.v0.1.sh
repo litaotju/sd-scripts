@@ -1,17 +1,19 @@
 set -x
 
 ## Change this for your model's data and model name, and number of steps
-input="./data/mkl.v1.0"
-model_name="mkl.v1.0.4"
-resume_model="mkl.v1.0.4"
+input="./data/dildo"
+model_name="dildo.v0.2"
+resume_model="dildo.v0.1"
 resume_from="output/${resume_model}/${resume_model}-state"
 
 steps=2000
 epochs=100
 
-resolution="512,512"
-training_data_dir="data/mkl.v1.0/instances_512x512x100.cap/1_mkl"
+resolution="512,768"
+training_data_dir="data/dildo"
 base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors
+base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/uberRealisticPornMerge_urpmv13.safetensors 
+
 
 ######################## almost common across all different models ##########################
 REG_DATA_OPTION=""
@@ -35,8 +37,7 @@ accelerate launch --num_cpu_threads_per_process 1 \
     --lr_scheduler=cosine \
     --network_module=networks.lora \
     --save_model_as=safetensors  \
-    --clip_skip=2 --seed=42 \
-    --network_dim 64 \
+    --clip_skip=2 --seed=42000 \
     \
     --max_train_epochs=${epochs} \
     --max_train_steps=${steps} \
@@ -45,11 +46,10 @@ accelerate launch --num_cpu_threads_per_process 1 \
     --save_last_n_epochs_state 1 \
     --save_state  \
     \
-    --resolution=${resolution} --color_aug \
+    --resolution=${resolution}  --random_crop --enable_bucket --color_aug \
     \
     --sample_prompts="${input}/prompts.txt" \
     --train_data_dir=${training_data_dir} \
-    --in_json=${input}/meta.json \
     ${REG_DATA_OPTION} \
     --output_name="${model_name}" \
     --output_dir=./output/${model_name} \
@@ -59,13 +59,6 @@ accelerate launch --num_cpu_threads_per_process 1 \
 
 cp ./output/${model_name}/${model_name}.safetensors  ~/stable-diffusion-webui/models/Lora
 
-for strength in 0.0 0.2 0.4 0.6 0.8 1.0; do
-    python ./gen_img_diffusers.py --from_file ${input}/prompts.txt --images_per_prompt 1 \
-    --outdir output/${model_name}/generated/ --fp16 --xformers --batch_size 6 \
-    --network_module networks.lora --network_weights output/${model_name}/${model_name}${epoch}.safetensors  --network_mul ${strength} \
-    --ckpt ${base_model} --steps 30 --H 600 --W 400 --seed 0
-done
-
 ### Run models on different epoch snapshots
 ckpts="/home/litao/stable-diffusion-webui/models/Stable-diffusion/uberRealisticPornMerge_urpmv13.safetensors 
        /home/litao/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors"
@@ -74,7 +67,7 @@ strength=1.0
 models=$(ls ./output/${model_name}/*safetensors)
 for ckpt in ${ckpts}; do
 for model in ${models}; do
-    python ./gen_img_diffusers.py --from_file ./gen.txt --images_per_prompt 1 \
+    python ./gen_img_diffusers.py --from_file data/dildo/prompts.txt --images_per_prompt 1 \
     --outdir ./output/${model_name}/compare_epochs.upm  --fp16 --xformers --batch_size 6 \
     --network_module networks.lora --network_weights ${model} --network_mul ${strength} \
     --ckpt ${ckpt} --steps 30 --H 768 --W 512 --seed 0
