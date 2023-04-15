@@ -1899,74 +1899,7 @@ class BatchData(NamedTuple):
   base: BatchDataBase
   ext: BatchDataExt
 
-
-def main(args):
-  if args.fp16:
-    dtype = torch.float16
-  elif args.bf16:
-    dtype = torch.bfloat16
-  else:
-    dtype = torch.float32
-
-  highres_fix = args.highres_fix_scale is not None
-  assert not highres_fix or args.image_path is None, f"highres_fix doesn't work with img2img / highres_fixはimg2imgと同時に使えません"
-
-  if args.v_parameterization and not args.v2:
-    print("v_parameterization should be with v2 / v1でv_parameterizationを使用することは想定されていません")
-  if args.v2 and args.clip_skip is not None:
-    print("v2 with clip_skip will be unexpected / v2でclip_skipを使用することは想定されていません")
-
-  # モデルを読み込む
-  if not os.path.isfile(args.ckpt):             # ファイルがないならパターンで探し、一つだけ該当すればそれを使う
-    files = glob.glob(args.ckpt)
-    if len(files) == 1:
-      args.ckpt = files[0]
-
-  use_stable_diffusion_format = os.path.isfile(args.ckpt)
-  if use_stable_diffusion_format:
-    print("load StableDiffusion checkpoint")
-    text_encoder, vae, unet = model_util.load_models_from_stable_diffusion_checkpoint(args.v2, args.ckpt)
-  else:
-    print("load Diffusers pretrained models")
-    loading_pipe = StableDiffusionPipeline.from_pretrained(args.ckpt, safety_checker=None, torch_dtype=dtype)
-    text_encoder = loading_pipe.text_encoder
-    vae = loading_pipe.vae
-    unet = loading_pipe.unet
-    tokenizer = loading_pipe.tokenizer
-    del loading_pipe
-
-  # VAEを読み込む
-  if args.vae is not None:
-    vae = model_util.load_vae(args.vae, dtype)
-    print("additional VAE loaded")
-
-  # # 置換するCLIPを読み込む
-  # if args.replace_clip_l14_336:
-  #   text_encoder = load_clip_l14_336(dtype)
-  #   print(f"large clip {CLIP_ID_L14_336} is loaded")
-
-  if args.clip_guidance_scale > 0.0 or args.clip_image_guidance_scale:
-    print("prepare clip model")
-    clip_model = CLIPModel.from_pretrained(CLIP_MODEL_PATH, torch_dtype=dtype)
-  else:
-    clip_model = None
-
-  if args.vgg16_guidance_scale > 0.0:
-    print("prepare resnet model")
-    vgg16_model = torchvision.models.vgg16(torchvision.models.VGG16_Weights.IMAGENET1K_V1)
-  else:
-    vgg16_model = None
-
-  # xformers、Hypernetwork対応
-  if not args.diffusers_xformers:
-    replace_unet_modules(unet, not args.xformers, args.xformers)
-
-  # tokenizerを読み込む
-  print("loading tokenizer")
-  if use_stable_diffusion_format:
-    tokenizer = train_util.load_tokenizer(args)
-
-  # schedulerを用意する
+def get_scheduler(args):
   sched_init_args = {}
   scheduler_num_noises_per_step = 1
   if args.sampler == "ddim":
@@ -2004,12 +1937,10 @@ def main(args):
     scheduler_cls = KDPM2AncestralDiscreteScheduler
     scheduler_module = diffusers.schedulers.scheduling_k_dpm_2_ancestral_discrete
     scheduler_num_noises_per_step = 2
-
   if args.v_parameterization:
     sched_init_args['prediction_type'] = 'v_prediction'
 
   # samplerの乱数をあらかじめ指定するための処理
-
   # replace randn
   class NoiseManager:
     def __init__(self):
@@ -2054,26 +1985,14 @@ def main(args):
   scheduler = scheduler_cls(num_train_timesteps=SCHEDULER_TIMESTEPS,
                             beta_start=SCHEDULER_LINEAR_START, beta_end=SCHEDULER_LINEAR_END,
                             beta_schedule=SCHEDLER_SCHEDULE, **sched_init_args)
-
   # clip_sample=Trueにする
   if hasattr(scheduler.config, "clip_sample") and scheduler.config.clip_sample is False:
     print("set clip_sample to True")
     scheduler.config.clip_sample = True
 
-  # deviceを決定する
-  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")             # "mps"を考量してない
+  return scheduler, noise_manager, scheduler_num_noises_per_step
 
-  # custom pipelineをコピったやつを生成する
-  vae.to(dtype).to(device)
-  text_encoder.to(dtype).to(device)
-  unet.to(dtype).to(device)
-  if clip_model is not None:
-    clip_model.to(dtype).to(device)
-  if vgg16_model is not None:
-    vgg16_model.to(dtype).to(device)
-
-  # networkを組み込む
-  if args.network_module:
+def create_networks_and_multis(args, vae, text_encoder, unet, dtype, device):
     networks = []
     network_default_muls = []
     for i, network_module in enumerate(args.network_module):
@@ -2104,18 +2023,159 @@ def main(args):
             print(f"metadata for: {network_weight}: {metadata}")
 
         network = imported_module.create_network_from_weights(network_mul, network_weight, vae, text_encoder, unet, **net_kwargs)
+        network.apply_to(text_encoder, unet)
+
+        if args.opt_channels_last:
+          network.to(memory_format=torch.channels_last)
+        network.to(dtype).to(device)
+
+        networks.append(network)
       else:
         raise ValueError("No weight. Weight is required.")
-      if network is None:
-        return
+    return networks, network_default_muls
+  
+def create_textual_inversion_embeddings(args, tokenizer, pipe, text_encoder):
+  token_ids_embeds = []
+  for embeds_file in args.textual_inversion_embeddings:
+    if model_util.is_safetensors(embeds_file):
+      from safetensors.torch import load_file
+      data = load_file(embeds_file)
+    else:
+      data = torch.load(embeds_file, map_location="cpu")
 
-      network.apply_to(text_encoder, unet)
+    embeds = next(iter(data.values()))
+    if type(embeds) != torch.Tensor:
+      raise ValueError(f"weight file does not contains Tensor / 重みファイルのデータがTensorではありません: {embeds_file}")
 
-      if args.opt_channels_last:
-        network.to(memory_format=torch.channels_last)
-      network.to(dtype).to(device)
+    num_vectors_per_token = embeds.size()[0]
+    token_string = os.path.splitext(os.path.basename(embeds_file))[0]
+    token_strings = [token_string] + [f"{token_string}{i+1}" for i in range(num_vectors_per_token - 1)]
 
-      networks.append(network)
+    # add new word to tokenizer, count is num_vectors_per_token
+    num_added_tokens = tokenizer.add_tokens(token_strings)
+    assert num_added_tokens == num_vectors_per_token, f"tokenizer has same word to token string (filename). please rename the file / 指定した名前（ファイル名）のトークンが既に存在します。ファイルをリネームしてください: {embeds_file}"
+
+    token_ids = tokenizer.convert_tokens_to_ids(token_strings)
+    print(f"Textual Inversion embeddings `{token_string}` loaded. Tokens are added: {token_ids}")
+    assert min(token_ids) == token_ids[0] and token_ids[-1] == token_ids[0] + len(token_ids) - 1, f"token ids is not ordered"
+    assert len(tokenizer) - 1 == token_ids[-1], f"token ids is not end of tokenize: {len(tokenizer)}"
+
+    if num_vectors_per_token > 1:
+      pipe.add_token_replacement(token_ids[0], token_ids)
+
+    token_ids_embeds.append((token_ids, embeds))
+
+  text_encoder.resize_token_embeddings(len(tokenizer))
+  token_embeds = text_encoder.get_input_embeddings().weight.data
+  for token_ids, embeds in token_ids_embeds:
+    for token_id, embed in zip(token_ids, embeds):
+      token_embeds[token_id] = embed
+
+def load_images(path):
+  if os.path.isfile(path):
+    paths = [path]
+  else:
+    paths = glob.glob(os.path.join(path, "*.png")) + glob.glob(os.path.join(path, "*.jpg")) + \
+        glob.glob(os.path.join(path, "*.jpeg")) + glob.glob(os.path.join(path, "*.webp"))
+    paths.sort()
+
+  images = []
+  for p in paths:
+    image = Image.open(p)
+    if image.mode != "RGB":
+      print(f"convert image to RGB from {image.mode}: {p}")
+      image = image.convert("RGB")
+    images.append(image)
+
+  return images
+
+def resize_images(imgs, size):
+  resized = []
+  for img in imgs:
+    r_img = img.resize(size, Image.Resampling.LANCZOS)
+    if hasattr(img, 'filename'):                              # filename属性がない場合があるらしい
+      r_img.filename = img.filename
+    resized.append(r_img)
+  return resized
+
+def main(args):
+  if args.fp16:
+    dtype = torch.float16
+  elif args.bf16:
+    dtype = torch.bfloat16
+  else:
+    dtype = torch.float32
+
+  highres_fix = args.highres_fix_scale is not None
+  assert not highres_fix or args.image_path is None, f"highres_fix doesn't work with img2img / highres_fixはimg2imgと同時に使えません"
+
+  if args.v_parameterization and not args.v2:
+    print("v_parameterization should be with v2 / v1でv_parameterizationを使用することは想定されていません")
+  if args.v2 and args.clip_skip is not None:
+    print("v2 with clip_skip will be unexpected / v2でclip_skipを使用することは想定されていません")
+
+  # モデルを読み込む
+  if not os.path.isfile(args.ckpt):             # ファイルがないならパターンで探し、一つだけ該当すればそれを使う
+    files = glob.glob(args.ckpt)
+    if len(files) == 1:
+      args.ckpt = files[0]
+
+  use_stable_diffusion_format = os.path.isfile(args.ckpt)
+  if use_stable_diffusion_format:
+    print("load StableDiffusion checkpoint")
+    text_encoder, vae, unet = model_util.load_models_from_stable_diffusion_checkpoint(args.v2, args.ckpt)
+    # tokenizerを読み込む
+    print("loading tokenizer")
+    tokenizer = train_util.load_tokenizer(args)
+
+  else:
+    print("load Diffusers pretrained models")
+    loading_pipe = StableDiffusionPipeline.from_pretrained(args.ckpt, safety_checker=None, torch_dtype=dtype)
+    text_encoder = loading_pipe.text_encoder
+    vae = loading_pipe.vae
+    unet = loading_pipe.unet
+    tokenizer = loading_pipe.tokenizer
+    del loading_pipe
+
+  # VAEを読み込む
+  if args.vae is not None:
+    vae = model_util.load_vae(args.vae, dtype)
+    print("additional VAE loaded")
+
+  if args.clip_guidance_scale > 0.0 or args.clip_image_guidance_scale:
+    print("prepare clip model")
+    clip_model = CLIPModel.from_pretrained(CLIP_MODEL_PATH, torch_dtype=dtype)
+  else:
+    clip_model = None
+
+  if args.vgg16_guidance_scale > 0.0:
+    print("prepare resnet model")
+    vgg16_model = torchvision.models.vgg16(torchvision.models.VGG16_Weights.IMAGENET1K_V1)
+  else:
+    vgg16_model = None
+
+  # xformers、Hypernetwork対応
+  if not args.diffusers_xformers:
+    replace_unet_modules(unet, not args.xformers, args.xformers)
+
+  # schedulerを用意する
+  scheduler, noise_manager, scheduler_num_noises_per_step = get_scheduler(args)
+
+  # deviceを決定する
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")             # "mps"を考量してない
+
+  # custom pipelineをコピったやつを生成する
+  vae.to(dtype).to(device)
+  text_encoder.to(dtype).to(device)
+  unet.to(dtype).to(device)
+  if clip_model is not None:
+    clip_model.to(dtype).to(device)
+  if vgg16_model is not None:
+    vgg16_model.to(dtype).to(device)
+
+  # networkを組み込む
+  if args.network_module:
+      networks, network_default_muls = create_networks_and_multis(args, vae, text_encoder, unet, dtype, device)
   else:
     networks = []
 
@@ -2159,41 +2219,7 @@ def main(args):
 
   # Textual Inversionを処理する
   if args.textual_inversion_embeddings:
-    token_ids_embeds = []
-    for embeds_file in args.textual_inversion_embeddings:
-      if model_util.is_safetensors(embeds_file):
-        from safetensors.torch import load_file
-        data = load_file(embeds_file)
-      else:
-        data = torch.load(embeds_file, map_location="cpu")
-
-      embeds = next(iter(data.values()))
-      if type(embeds) != torch.Tensor:
-        raise ValueError(f"weight file does not contains Tensor / 重みファイルのデータがTensorではありません: {embeds_file}")
-
-      num_vectors_per_token = embeds.size()[0]
-      token_string = os.path.splitext(os.path.basename(embeds_file))[0]
-      token_strings = [token_string] + [f"{token_string}{i+1}" for i in range(num_vectors_per_token - 1)]
-
-      # add new word to tokenizer, count is num_vectors_per_token
-      num_added_tokens = tokenizer.add_tokens(token_strings)
-      assert num_added_tokens == num_vectors_per_token, f"tokenizer has same word to token string (filename). please rename the file / 指定した名前（ファイル名）のトークンが既に存在します。ファイルをリネームしてください: {embeds_file}"
-
-      token_ids = tokenizer.convert_tokens_to_ids(token_strings)
-      print(f"Textual Inversion embeddings `{token_string}` loaded. Tokens are added: {token_ids}")
-      assert min(token_ids) == token_ids[0] and token_ids[-1] == token_ids[0] + len(token_ids) - 1, f"token ids is not ordered"
-      assert len(tokenizer) - 1 == token_ids[-1], f"token ids is not end of tokenize: {len(tokenizer)}"
-
-      if num_vectors_per_token > 1:
-        pipe.add_token_replacement(token_ids[0], token_ids)
-
-      token_ids_embeds.append((token_ids, embeds))
-
-    text_encoder.resize_token_embeddings(len(tokenizer))
-    token_embeds = text_encoder.get_input_embeddings().weight.data
-    for token_ids, embeds in token_ids_embeds:
-      for token_id, embed in zip(token_ids, embeds):
-        token_embeds[token_id] = embed
+    create_textual_inversion_embeddings(args)
 
   # promptを取得する
   if args.from_file is not None:
@@ -2210,33 +2236,6 @@ def main(args):
     args.n_iter = 1
 
   # img2imgの前処理、画像の読み込みなど
-  def load_images(path):
-    if os.path.isfile(path):
-      paths = [path]
-    else:
-      paths = glob.glob(os.path.join(path, "*.png")) + glob.glob(os.path.join(path, "*.jpg")) + \
-          glob.glob(os.path.join(path, "*.jpeg")) + glob.glob(os.path.join(path, "*.webp"))
-      paths.sort()
-
-    images = []
-    for p in paths:
-      image = Image.open(p)
-      if image.mode != "RGB":
-        print(f"convert image to RGB from {image.mode}: {p}")
-        image = image.convert("RGB")
-      images.append(image)
-
-    return images
-
-  def resize_images(imgs, size):
-    resized = []
-    for img in imgs:
-      r_img = img.resize(size, Image.Resampling.LANCZOS)
-      if hasattr(img, 'filename'):                              # filename属性がない場合があるらしい
-        r_img.filename = img.filename
-      resized.append(r_img)
-    return resized
-
   if args.image_path is not None:
     print(f"load image for img2img: {args.image_path}")
     init_images = load_images(args.image_path)
@@ -2482,10 +2481,10 @@ def main(args):
           else:
             fln = os.path.splitext(os.path.basename(init_images.filename))[0] + ".png"
         elif args.sequential_file_name:
-          fln = f"im_{highres_prefix}{step_first + i + 1:06d}.png"
+          fln = f"{args.fname_prefix}_im_{highres_prefix}{step_first + i + 1:06d}.png"
         else:
-          fln = f"im_{ts_str}_{highres_prefix}{i:03d}_{seed}.png"
-
+          fln = f"{args.fname_prefix}_im_{ts_str}_{highres_prefix}{i:03d}_{seed}.png"
+        print(f"Saving {fln}")
         image.save(os.path.join(args.outdir, fln), pnginfo=metadata)
 
       if not args.no_preview and not highres_1st and args.interactive:
@@ -2529,7 +2528,7 @@ def main(args):
       steps = args.steps
       seeds = None
       strength = 0.8 if args.strength is None else args.strength
-      negative_prompt = ""
+      negative_prompt = args.negative_prompt
       clip_prompt = None
       network_muls = None
 
@@ -2763,7 +2762,8 @@ if __name__ == '__main__':
                       help="use latents upscaling for highres fix / highres fixでlatentで拡大する")
   parser.add_argument("--negative_scale", type=float, default=None,
                       help="set another guidance scale for negative prompt / ネガティブプロンプトのscaleを指定する")
-
+  parser.add_argument("--negative_prompt", type=str, default="",
+                      help="init negative prompt, will be override by the negative prompt from file per sample")
   parser.add_argument("--control_net_models", type=str, default=None, nargs='*',
                       help='ControlNet models to use / 使用するControlNetのモデル名')
   parser.add_argument("--control_net_preps", type=str, default=None, nargs='*',
@@ -2772,5 +2772,7 @@ if __name__ == '__main__':
   parser.add_argument("--control_net_ratios", type=float, default=None, nargs='*',
                       help='ControlNet guidance ratio for steps / ControlNetでガイドするステップ比率')
 
+  parser.add_argument("--fname_prefix", type=str, default="",
+                      help='Prefix to add before the saved image name')
   args = parser.parse_args()
   main(args)
