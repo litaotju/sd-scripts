@@ -6,11 +6,12 @@ set -x
 model_name=$1
 epochs=$2
 training_data_dir=$3
+output=$4
 
 # optional
-resume_from=$4
+resume_from=$5
 
-out_dir=./output/${model_name}-$(date '+%Y-%m-%d-%H-%M-%S')
+out_dir=./${output}/${model_name}-$(date '+%Y-%m-%d-%H-%M-%S')
 mkdir -p ${out_dir}
 resolution="400,600 --random_crop --enable_bucket"
 # base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors
@@ -32,6 +33,10 @@ cp "${training_data_dir}/prompts.txt" ${out_dir}/data/
 training_data_dir=${out_dir}/data
 sample_prompts=${out_dir}/data/prompts.txt
 
+negative_prompt="illustration, 3d, sepia, painting, cartoons, sketch, (worst quality:2), (low quality:2), \
+(normal quality:2), lowres, bad anatomy, bad hands, normal quality, ((monochrome)), ((grayscale:1.2)), \
+futanari, full-package_futanari, penis_from_girl, newhalf, collapsed eyeshadow, multiple eyebrows, \
+vaginas in breasts,holes on breasts, fleckles, stretched nipples, nipples on buttocks, analog, analogphoto, signatre, logo,2 faces"
 ######################## almost common across all different models ##########################
 
 RESUME_OPTION=""
@@ -57,8 +62,10 @@ accelerate launch --num_cpu_threads_per_process 1 \
     --network_dim 64 \
     \
     --max_train_epochs=${epochs} \
+    --max_token_length=225 \
     --save_every_n_epochs=5 \
     --sample_every_n_epochs=5 \
+    --negative_prompt="${negative_prompt}" \
     --save_last_n_epochs_state 1 \
     --save_state  \
     \
@@ -82,5 +89,7 @@ if [ ! -e ${dst}/${model_name}.safetensors ]; then
 else 
     echo "Model already exists, not overwriting, please delete the model first."
 fi
+
+./scripts/eval_concepts.sh ${out_dir}/${model_name}.safetensors
 
 set +x

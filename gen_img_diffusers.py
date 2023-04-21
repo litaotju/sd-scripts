@@ -46,6 +46,7 @@ VGG(
 )
 """
 
+from dataclasses import dataclass
 import json
 from typing import Any, List, NamedTuple, Optional, Tuple, Union, Callable
 import glob
@@ -2098,6 +2099,113 @@ def resize_images(imgs, size):
     resized.append(r_img)
   return resized
 
+
+@dataclass
+class SampleOptions:
+    """Class for keeping track of options used for sampling one image."""
+    prompt: str = ""
+    width: int = 512
+    height: int = 512
+    steps: int = 30
+    seeds: int = 0
+    scale: float = 1.0
+    negative_scale: float = 0
+    strength: float = 1
+    negative_prompt: str = ""
+    clip_prompt: str = ""
+    network_muls: List[float] = None
+
+
+def parse_prompt_args(prompt, cmd_args, num_networks):
+  args = cmd_args
+  prompt_args = prompt.strip().split(' --')
+
+  options = SampleOptions()
+  options.prompt = prompt_args[0]
+  options.width = args.W
+  options.height = args.H
+  options.scale = args.scale
+  options.negative_scale = args.negative_scale
+  options.steps = args.steps
+  options.seeds = None
+  options.strength = 0.8 if args.strength is None else args.strength
+  options.negative_prompt = args.negative_prompt
+  options.clip_prompt = None
+  options.network_muls = None
+
+  for parg in prompt_args[1:]:
+    try:
+      m = re.match(r'w (\d+)', parg, re.IGNORECASE)
+      if m:
+        options.width = int(m.group(1))
+        print(f"width: {options.width}")
+        continue
+
+      m = re.match(r'h (\d+)', parg, re.IGNORECASE)
+      if m:
+        options.height = int(m.group(1))
+        print(f"height: {options.height}")
+        continue
+
+      m = re.match(r's (\d+)', parg, re.IGNORECASE)
+      if m:               # steps
+        options.steps = max(1, min(1000, int(m.group(1))))
+        print(f"steps: {options.steps}")
+        continue
+
+      m = re.match(r'd ([\d,]+)', parg, re.IGNORECASE)
+      if m:               # seed
+        options.seeds = [int(d) for d in m.group(1).split(',')]
+        print(f"seeds: {options.seeds}")
+        continue
+
+      m = re.match(r'l ([\d\.]+)', parg, re.IGNORECASE)
+      if m:               # scale
+        options.scale = float(m.group(1))
+        print(f"scale: {options.scale}")
+        continue
+
+      m = re.match(r'nl ([\d\.]+|none|None)', parg, re.IGNORECASE)
+      if m:               # negative scale
+        if m.group(1).lower() == 'none':
+          options.negative_scale = None
+        else:
+          options.negative_scale = float(m.group(1))
+        print(f"negative scale: {options.negative_scale}")
+        continue
+
+      m = re.match(r't ([\d\.]+)', parg, re.IGNORECASE)
+      if m:               # strength
+        options.strength = float(m.group(1))
+        print(f"strength: {options.strength}")
+        continue
+
+      m = re.match(r'n (.+)', parg, re.IGNORECASE)
+      if m:               # negative prompt
+        options.negative_prompt = m.group(1)
+        print(f"negative prompt: {options.negative_prompt}")
+        continue
+
+      m = re.match(r'c (.+)', parg, re.IGNORECASE)
+      if m:               # clip prompt
+        options.clip_prompt = m.group(1)
+        print(f"clip prompt: {options.clip_prompt}")
+        continue
+
+      m = re.match(r'am ([\d\.\-,]+)', parg, re.IGNORECASE)
+      if m:               # network multiplies
+        options.network_muls = [float(v) for v in m.group(1).split(",")]
+        while len(options.network_muls) < num_networks:
+          options.network_muls.append(options.network_muls[-1])
+        print(f"network mul: {options.network_muls}")
+        continue
+
+    except ValueError as ex:
+      print(f"Exception in parsing / 解析エラー: {parg}")
+      print(ex)
+  return options
+
+
 def main(args):
   if args.fp16:
     dtype = torch.float16
@@ -2521,91 +2629,20 @@ def main(args):
         prompt = prompt_list[prompt_index]
 
       # parse prompt
-      width = args.W
-      height = args.H
-      scale = args.scale
-      negative_scale = args.negative_scale
-      steps = args.steps
-      seeds = None
-      strength = 0.8 if args.strength is None else args.strength
-      negative_prompt = args.negative_prompt
-      clip_prompt = None
-      network_muls = None
-
-      prompt_args = prompt.strip().split(' --')
-      prompt = prompt_args[0]
+      options = parse_prompt_args(prompt, args, num_networks=len(networks))
+      # import pdb; pdb.set_trace()
+      prompt = options.prompt
+      width = options.width
+      height = options.height
+      scale = options.scale
+      negative_scale = options.negative_scale
+      steps = options.steps
+      seeds = options.seeds
+      strength = options.strength
+      negative_prompt = options.negative_prompt
+      clip_prompt = options.clip_prompt
+      network_muls = options.network_muls
       print(f"prompt {prompt_index+1}/{len(prompt_list)}: {prompt}")
-
-      for parg in prompt_args[1:]:
-        try:
-          m = re.match(r'w (\d+)', parg, re.IGNORECASE)
-          if m:
-            width = int(m.group(1))
-            print(f"width: {width}")
-            continue
-
-          m = re.match(r'h (\d+)', parg, re.IGNORECASE)
-          if m:
-            height = int(m.group(1))
-            print(f"height: {height}")
-            continue
-
-          m = re.match(r's (\d+)', parg, re.IGNORECASE)
-          if m:               # steps
-            steps = max(1, min(1000, int(m.group(1))))
-            print(f"steps: {steps}")
-            continue
-
-          m = re.match(r'd ([\d,]+)', parg, re.IGNORECASE)
-          if m:               # seed
-            seeds = [int(d) for d in m.group(1).split(',')]
-            print(f"seeds: {seeds}")
-            continue
-
-          m = re.match(r'l ([\d\.]+)', parg, re.IGNORECASE)
-          if m:               # scale
-            scale = float(m.group(1))
-            print(f"scale: {scale}")
-            continue
-
-          m = re.match(r'nl ([\d\.]+|none|None)', parg, re.IGNORECASE)
-          if m:               # negative scale
-            if m.group(1).lower() == 'none':
-              negative_scale = None
-            else:
-              negative_scale = float(m.group(1))
-            print(f"negative scale: {negative_scale}")
-            continue
-
-          m = re.match(r't ([\d\.]+)', parg, re.IGNORECASE)
-          if m:               # strength
-            strength = float(m.group(1))
-            print(f"strength: {strength}")
-            continue
-
-          m = re.match(r'n (.+)', parg, re.IGNORECASE)
-          if m:               # negative prompt
-            negative_prompt = m.group(1)
-            print(f"negative prompt: {negative_prompt}")
-            continue
-
-          m = re.match(r'c (.+)', parg, re.IGNORECASE)
-          if m:               # clip prompt
-            clip_prompt = m.group(1)
-            print(f"clip prompt: {clip_prompt}")
-            continue
-
-          m = re.match(r'am ([\d\.\-,]+)', parg, re.IGNORECASE)
-          if m:               # network multiplies
-            network_muls = [float(v) for v in m.group(1).split(",")]
-            while len(network_muls) < len(networks):
-              network_muls.append(network_muls[-1])
-            print(f"network mul: {network_muls}")
-            continue
-
-        except ValueError as ex:
-          print(f"Exception in parsing / 解析エラー: {parg}")
-          print(ex)
 
       if seeds is not None:
         # 数が足りないなら繰り返す

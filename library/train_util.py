@@ -1587,6 +1587,8 @@ def add_training_arguments(parser: argparse.ArgumentParser, support_dreambooth: 
                                'k_lms', 'k_euler', 'k_euler_a', 'k_dpm_2', 'k_dpm_2_a'],
                       help=f'sampler (scheduler) type for sample images / サンプル出力時のサンプラー（スケジューラ）の種類')
 
+  parser.add_argument("--negative_prompt", type=str, default=None,
+                      help="file for prompts to generate sample images / 学習中モデルのサンプル出力用プロンプトのファイル")
   if support_dreambooth:
     # DreamBooth training
     parser.add_argument("--prior_loss_weight", type=float, default=1.0,
@@ -2297,7 +2299,7 @@ def sample_images(accelerator, args: argparse.Namespace, epoch, steps, device, v
         # subset of gen_img_diffusers
         prompt_args = prompt.split(' --')
         prompt = prompt_args[0]
-        negative_prompt = None
+        negative_prompt = args.negative_prompt
         sample_steps = 30
         width = height = 512
         scale = 7.5

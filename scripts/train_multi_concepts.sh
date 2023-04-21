@@ -27,6 +27,7 @@ fi
 
 # copy the data to the output dir
 mkdir -p ${out_dir}/data/
+# "/" here is important, to make sure the content of the directory is copied, not the directory itself
 rsync -r "${training_data_dir}/" "${out_dir}/data/"
 cp "${training_data_dir}/prompts.txt" ${out_dir}/data/
 training_data_dir=${out_dir}/data
@@ -40,6 +41,11 @@ if [ -e "${resume_from}/pytorch_model.bin" ]; then
 else
     echo "Can not find the ${resume_from}/pytorch_model.bin, not resume"
 fi
+
+negative_prompt="illustration, 3d, sepia, painting, cartoons, sketch, (worst quality:2), (low quality:2), \
+(normal quality:2), lowres, bad anatomy, bad hands, normal quality, ((monochrome)), ((grayscale:1.2)), \
+futanari, full-package_futanari, penis_from_girl, newhalf, collapsed eyeshadow, multiple eyebrows, \
+vaginas in breasts,holes on breasts, fleckles, stretched nipples, nipples on buttocks, analog, analogphoto, signatre, logo,2 faces"
 
 # Train the model
 accelerate launch --num_cpu_threads_per_process 1 \
@@ -57,8 +63,10 @@ accelerate launch --num_cpu_threads_per_process 1 \
     --network_dim 64 \
     \
     --max_train_epochs=${epochs} \
+    --max_token_length=225 \
     --save_every_n_epochs=5 \
     --sample_every_n_epochs=5 \
+    --negative_prompt="${negative_prompt}" \
     --save_last_n_epochs_state 1 \
     --save_state  \
     \
@@ -82,5 +90,7 @@ if [ ! -e ${dst}/${model_name}.safetensors ]; then
 else 
     echo "Model already exists, not overwriting, please delete the model first."
 fi
+
+./scripts/eval_concepts.sh ${out_dir}/${model_name}.safetensors
 
 set +x
