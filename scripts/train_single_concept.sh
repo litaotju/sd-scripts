@@ -8,14 +8,15 @@ epochs=$2
 training_data_dir=$3
 output=$4
 
+CHECK_EVERY_N_EPOCHS=5
 # optional
-resume_from=$5
+resume_from=$4
 
-out_dir=./${output}/${model_name}-$(date '+%Y-%m-%d-%H-%M-%S')
+out_dir=./output/${model_name}-$(date '+%Y-%m-%d-%H-%M-%S')
 mkdir -p ${out_dir}
-resolution="400,600 --random_crop --enable_bucket"
-# base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors
-base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/chilloutmix_NiPrunedFp32Fix.safetensors
+resolution="512,768 --random_crop --enable_bucket"
+base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors
+# base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/chilloutmix_NiPrunedFp32Fix.safetensors
 
 if [ ! -e ${base_model} ]; then
     echo "Can not find the base model ${base_model}"
@@ -63,8 +64,8 @@ accelerate launch --num_cpu_threads_per_process 1 \
     \
     --max_train_epochs=${epochs} \
     --max_token_length=225 \
-    --save_every_n_epochs=5 \
-    --sample_every_n_epochs=5 \
+    --save_every_n_epochs=${CHECK_EVERY_N_EPOCHS} \
+    --sample_every_n_epochs=${CHECK_EVERY_N_EPOCHS} \
     --negative_prompt="${negative_prompt}" \
     --save_last_n_epochs_state 1 \
     --save_state  \

@@ -1,8 +1,12 @@
 lora_weights=$(realpath $1)
 workdir=$(dirname "${lora_weights}")
+
 prompts=$2
 default_prompts=${workdir}/data/prompts.txt
+IMGAE_PER_PROMPT=6
 
+# =====================================================================
+# auto set
 if [ "Z${prompts}" = "Z" ] || [ ! -f ${prompts} ]; then
     echo "Did not find the prompts file ${prompts}, use the default one"
     prompts=${default_prompts}
@@ -13,7 +17,9 @@ if [ ! -e ${lora_weights} ]; then
     exit 1
 fi
 
-out=${workdir}/eval
+ts=$(date '+%Y-%m-%d-%H-%M-%S')
+out=${workdir}/eval-${ts}
+
 if [ -e ${out} ]; then
     echo "The output dir ${out} already exists, please remove it first"
     exit 1
@@ -29,7 +35,7 @@ strengths="0.6 0.8 0.9 1.0"
 
 for strength in $strengths ; do
     prefix=$(basename ${lora_weights} .safetensors)-${strength}
-    python ./gen_img_diffusers.py --from_file $prompts  --images_per_prompt 1 \
+    python ./gen_img_diffusers.py --from_file $prompts  --images_per_prompt ${IMGAE_PER_PROMPT} \
     --outdir ${out} --fp16 --xformers --batch_size 6 \
     --network_module networks.lora --network_weights ${lora_weights}  --network_mul ${strength} \
     --ckpt ${ckpt} --steps 30 --H 768 --W 512 --seed 42 --fname_prefix ${prefix} \
