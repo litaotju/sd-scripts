@@ -9,3 +9,5 @@ data
 *.log
 output
 gen/
+*-data/
+civiti

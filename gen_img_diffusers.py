@@ -61,6 +61,7 @@ import math
 import os
 import random
 import re
+import cv2
 
 import diffusers
 import numpy as np
@@ -84,6 +85,8 @@ import library.model_util as model_util
 import library.train_util as train_util
 import tools.original_control_net as original_control_net
 from tools.original_control_net import ControlNetInfo
+from restore_face import FaceFixer
+from basicsr.utils import imwrite
 
 # Tokenizer: checkpointから読み込むのではなくあらかじめ提供されているものを使う
 TOKENIZER_PATH = "openai/clip-vit-large-patch14"
@@ -2423,6 +2426,9 @@ def main(args):
   os.makedirs(args.outdir, exist_ok=True)
   max_embeddings_multiples = 1 if args.max_embeddings_multiples is None else args.max_embeddings_multiples
 
+  if args.restore_face:
+    face_fixer = FaceFixer.create_default_fixer()
+
   for gen_iter in range(args.n_iter):
     print(f"iteration {gen_iter+1}/{args.n_iter}")
     iter_seed = random.randint(0, 0x7fffffff)
@@ -2582,6 +2588,7 @@ def main(args):
           metadata.add_text("negative-scale", str(negative_scale))
         if clip_prompt is not None:
           metadata.add_text("clip-prompt", clip_prompt)
+        metadata.add_text("ckpt", args.ckpt)
 
         if args.use_original_file_name and init_images is not None:
           if type(init_images) is list:
@@ -2592,8 +2599,19 @@ def main(args):
           fln = f"{args.fname_prefix}_im_{highres_prefix}{step_first + i + 1:06d}.png"
         else:
           fln = f"{args.fname_prefix}_im_{ts_str}_{highres_prefix}{i:03d}_{seed}.png"
-        print(f"Saving {fln}")
-        image.save(os.path.join(args.outdir, fln), pnginfo=metadata)
+          restore_fln = f"{args.fname_prefix}_im_{ts_str}_{highres_prefix}{i:03d}_{seed}_restored.png"
+
+        if not args.restore_face or args.store_original:
+          print(f"Saving {fln}")
+          raw_img_path = os.path.join(args.outdir, fln)
+          image.save(raw_img_path, pnginfo=metadata)
+
+        if args.restore_face:
+          import cv2
+          img = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2RGB)
+          restored_image = face_fixer.restore_face(img)
+          imwrite(restored_image, os.path.join(args.outdir, restore_fln))
+
 
       if not args.no_preview and not highres_1st and args.interactive:
         try:
@@ -2811,5 +2829,7 @@ if __name__ == '__main__':
 
   parser.add_argument("--fname_prefix", type=str, default="",
                       help='Prefix to add before the saved image name')
+  parser.add_argument('--restore_face', action='store_true', help='Restore face using CodeFormer')
+  parser.add_argument('--store_original', action='store_true', help='Store original when restore face using CodeFormer, only works when restore_face is True')
   args = parser.parse_args()
   main(args)

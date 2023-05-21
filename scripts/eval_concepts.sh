@@ -3,7 +3,7 @@ workdir=$(dirname "${lora_weights}")
 
 prompts=$2
 default_prompts=${workdir}/data/prompts.txt
-IMGAE_PER_PROMPT=6
+IMGAE_PER_PROMPT=1
 
 # =====================================================================
 # auto set
@@ -39,5 +39,6 @@ for strength in $strengths ; do
     --outdir ${out} --fp16 --xformers --batch_size 6 \
     --network_module networks.lora --network_weights ${lora_weights}  --network_mul ${strength} \
     --ckpt ${ckpt} --steps 30 --H 768 --W 512 --seed 42 --fname_prefix ${prefix} \
+    --max_embeddings_multiples=3 \
     --negative_prompt="${negative_prompt}"
 done

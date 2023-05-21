@@ -7,13 +7,17 @@ model_name=$1
 epochs=$2
 training_data_dir=$3
 
+if [[ ! -e ${training_data_dir} || "${training_data_dir}" = "" ||  "${training_data_dir}" = "/" ]] ; then 
+    echo "Can not find the training data dir ${training_data_dir}" ; exit 1; 
+fi
+
 CHECK_EVERY_N_EPOCHS=5
 # optional
 resume_from=$4
 
 out_dir=./output/${model_name}-$(date '+%Y-%m-%d-%H-%M-%S')
 mkdir -p ${out_dir}
-resolution="512,768--random_crop --enable_bucket"
+resolution="512,768 --random_crop --enable_bucket"
 base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors
 # base_model=/home/litao/stable-diffusion-webui/models/Stable-diffusion/chilloutmix_NiPrunedFp32Fix.safetensors
 
@@ -21,18 +25,26 @@ if [ ! -e ${base_model} ]; then
     echo "Can not find the base model ${base_model}"
     exit 1
 fi
-if [ ! -e "${training_data_dir}/prompts.txt" ]; then
-    echo "Can not find the sample prompts.txt in directory ${training_data_dir}"
-    exit 1
-fi
 
 # copy the data to the output dir
 mkdir -p ${out_dir}/data/
+
+# copy or generate the prompts.txt
+if [ ! -e "${training_data_dir}/prompts.txt" ]; then
+    echo "Can not find the sample prompts.txt in directory ${training_data_dir}"
+    for i in ${training_data_dir}/*; do
+        trigger_words=$(basename "${i}" | awk -F "_" '{print $2}')
+        echo "${trigger_words} --w 512 --h 768
+${trigger_words} --h 512 --w 768" >> ${out_dir}/data/prompts.txt
+    done
+else
+    cp "${training_data_dir}/prompts.txt" ${out_dir}/data/
+fi
+sample_prompts=${out_dir}/data/prompts.txt
+
 # "/" here is important, to make sure the content of the directory is copied, not the directory itself
 rsync -r "${training_data_dir}/" "${out_dir}/data/"
-cp "${training_data_dir}/prompts.txt" ${out_dir}/data/
 training_data_dir=${out_dir}/data
-sample_prompts=${out_dir}/data/prompts.txt
 
 ######################## almost common across all different models ##########################
 
@@ -42,6 +54,8 @@ if [ -e "${resume_from}/pytorch_model.bin" ]; then
 else
     echo "Can not find the ${resume_from}/pytorch_model.bin, not resume"
 fi
+
+SAVE_OPTION="--save_every_n_epochs=${CHECK_EVERY_N_EPOCHS} --save_last_n_epochs_state 1 --save_state"
 
 negative_prompt="illustration, 3d, sepia, painting, cartoons, sketch, (worst quality:2), (low quality:2), \
 (normal quality:2), lowres, bad anatomy, bad hands, normal quality, ((monochrome)), ((grayscale:1.2)), \
@@ -65,11 +79,9 @@ accelerate launch --num_cpu_threads_per_process 1 \
     \
     --max_train_epochs=${epochs} \
     --max_token_length=225 \
-    --save_every_n_epochs=${CHECK_EVERY_N_EPOCHS} \
     --sample_every_n_epochs=${CHECK_EVERY_N_EPOCHS} \
     --negative_prompt="${negative_prompt}" \
-    --save_last_n_epochs_state 1 \
-    --save_state  \
+    ${SAVE_OPTION} \
     \
     --resolution=${resolution} --color_aug \
     \
@@ -84,8 +96,8 @@ accelerate launch --num_cpu_threads_per_process 1 \
 
 # TODO: do evaluation, and save to the outputs
 
-# Deploy the lora to stable-diffusion-webui
-dst=/home/litao/stable-diffusion-webui/models/Lora
+# # Deploy the lora to stable-diffusion-webui
+dst=/home/litao/stable-diffusion-webui/models/Lora/local-trained
 if [ ! -e ${dst}/${model_name}.safetensors ]; then
     cp ${out_dir}/${model_name}.safetensors ${dst}/
 else 
